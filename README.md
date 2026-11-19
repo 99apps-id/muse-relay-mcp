@@ -66,16 +66,17 @@ The shortest path: relay live → **Part A** → **Part C** → restart the host
 
 | Tool | Mode | Behaviour |
 | --- | --- | --- |
-| `ask_muse` | Blocking | Ask a question and wait for the answer in one call (default timeout 600 s, adjustable 10–1800 s via `timeoutSecs`). On timeout the question is **not** cancelled — you receive a ticket id to fetch the answer later. |
+| `ask_muse` | Blocking | Ask a question and wait for the answer in one call (default timeout 600 s, adjustable 5–3600 s via `timeoutSecs`). Uses filesystem event watchers (`fs.watch`) so the answer returns **immediately** the instant Muse finishes. On timeout the question is **not** cancelled — you receive a `PENDING` result with the ticket id to continue waiting via `ask_muse_check`. |
 | `ask_muse_start` | Async | Submit a question and return immediately with a ticket id. |
-| `ask_muse_check` | Async | Fetch the answer for a ticket id, or a `PENDING` status. Safe to call repeatedly. |
+| `ask_muse_check` | Async / Long-Poll | Fetch or wait for a ticket id. If the answer is already in the outbox, returns immediately (0 ms). Otherwise watches the outbox in real time up to `waitSecs` (default 25 s, configurable 0–600 s), returning the instant Muse finishes or `PENDING` if still working. Safe to call repeatedly. |
 
 Shared arguments: `prompt` (required), `workspaceRoot` (optional), `answerLanguage` (`en` / `id`).
 
 ## Blocking vs Async
 
-- **Blocking** (`ask_muse`) is simple: the agent asks and receives the answer in the same tool call. The cost: the agent's turn is fully parked for the whole wait (minutes), and a host with a short tool-call timeout may cut the call off — the question still survives and can be fetched by ticket.
-- **Async** (`ask_muse_start` + `ask_muse_check`) never parks the agent: it submits, keeps working on other things, and checks back later. It is immune to host tool-call timeouts and is usually the safer choice for coding agents.
+- **Instant delivery when Muse is fast:** Both `ask_muse` and `ask_muse_check` attach an OS filesystem watcher (`fs.watch`) to the relay `outbox` and `archive` folders. Whether Muse takes 8 seconds or 8 minutes, the tool returns within milliseconds of the answer file landing.
+- **Blocking** (`ask_muse`) is simple: the agent asks and waits in a single tool call (up to `timeoutSecs`, max 3600 s / 1 hour), while sending MCP `notifications/progress` heartbeats when requested by the host. If the call reaches `timeoutSecs` first, it returns a non-error `PENDING` response containing the ticket id so the agent can seamlessly continue waiting with `ask_muse_check`.
+- **Async + Long-Polling** (`ask_muse_start` + `ask_muse_check`) is immune to strict MCP host tool-call timeouts (such as 60–120 s limits in Cursor, Codex, or Claude Code). Each `ask_muse_check` call can hold for `waitSecs` (default 25 s, or pass e.g. `waitSecs: 45` / `60`) so the agent can patiently wait for long tasks without burning dozens of rapid polling turns.
 
 ## How It Works
 
@@ -167,43 +168,120 @@ The MCP server is only the front door — without a running relay behind it, que
 
 ### Part C — Register it in your MCP host
 
-1. Add the server to your host's MCP configuration. Most hosts (terminal agents, Cursor, Gemini CLI, Claude Code, and similar) use the `mcpServers` key:
+Below are ready-to-use configurations for **VS Code**, **Claude Code**, **Claude Desktop**, **OpenAI Codex CLI**, **Google Antigravity**, **Cursor / Windsurf**, and **Gemini CLI**. On Windows, escape backslashes in JSON paths (`C:\\Project\\muse-relay-mcp\\server.js`), or use forward slashes (`C:/Project/muse-relay-mcp/server.js`).
 
-   ```json
-   {
-     "mcpServers": {
-       "muse-relay": {
-         "command": "node",
-         "args": ["<INSTALL_DIR>\\server.js"]
-       }
-     }
-   }
-   ```
+#### 1. VS Code (GitHub Copilot)
 
-   On Windows, escape backslashes in JSON paths (`C:\\Project\\muse-relay-mcp\\server.js`), or use forward slashes.
+VS Code uses the top-level `"servers"` key in `%APPDATA%\Code\User\mcp.json` (global) or `.vscode/mcp.json` (workspace):
 
-2. **VS Code** uses the key `servers` instead of `mcpServers` in `%APPDATA%\Code\User\mcp.json`:
+```json
+{
+  "servers": {
+    "muse-relay": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["<INSTALL_DIR>\\server.js"]
+    }
+  }
+}
+```
 
-   ```json
-   {
-     "servers": {
-       "muse-relay": {
-         "command": "node",
-         "args": ["<INSTALL_DIR>\\server.js"]
-       }
-     }
-   }
-   ```
+#### 2. Claude Code (CLI)
 
-3. If your relay folder is not the default, add an environment entry:
+Register with a single command:
 
-   ```json
-   { "env": { "MUSE_RELAY_DIR": "D:\\path\\to\\muse-relay" } }
-   ```
+```bash
+claude mcp add muse-relay -- node "<INSTALL_DIR>/server.js"
+```
 
-4. **Restart the host app or start a new session** — MCP hosts read their server list at startup, so the new tools appear only afterwards.
+Or add to `~/.claude.json` (user scope) or `.mcp.json` (project scope):
 
-5. Verify end-to-end: ask the host's agent to call `ask_muse_start` with a question only your personal Muse can answer (something about your own projects or earlier decisions), then `ask_muse_check` until the answer arrives. Expect minutes, not seconds.
+```json
+{
+  "mcpServers": {
+    "muse-relay": {
+      "command": "node",
+      "args": ["<INSTALL_DIR>\\server.js"]
+    }
+  }
+}
+```
+
+#### 3. Claude Desktop
+
+Add to `%APPDATA%\Claude\claude_desktop_config.json` (Windows) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+
+```json
+{
+  "mcpServers": {
+    "muse-relay": {
+      "command": "node",
+      "args": ["<INSTALL_DIR>\\server.js"]
+    }
+  }
+}
+```
+
+#### 4. OpenAI Codex CLI
+
+Codex CLI uses **TOML** in `~/.codex/config.toml` (or `%USERPROFILE%\.codex\config.toml` on Windows):
+
+```toml
+[mcp_servers.muse-relay]
+command = "node"
+args = ["<INSTALL_DIR>/server.js"]
+```
+
+*(Optional)* If your relay folder is custom, add `env = { MUSE_RELAY_DIR = "D:/path/to/muse-relay" }` under `[mcp_servers.muse-relay]`.
+
+#### 5. Google Antigravity
+
+Add to `%USERPROFILE%\.gemini\antigravity\mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "muse-relay": {
+      "command": "node",
+      "args": ["<INSTALL_DIR>\\server.js"]
+    }
+  }
+}
+```
+
+#### 6. Cursor, Windsurf, Cline, Gemini CLI & Other MCP Hosts
+
+Most other MCP hosts (`~/.cursor/mcp.json`, `~/.codeium/windsurf/mcp_config.json`, `~/.gemini/settings.json`, termigo, ODON) use the standard `"mcpServers"` schema:
+
+```json
+{
+  "mcpServers": {
+    "muse-relay": {
+      "command": "node",
+      "args": ["<INSTALL_DIR>\\server.js"]
+    }
+  }
+}
+```
+
+#### Custom Relay Folder (`MUSE_RELAY_DIR`)
+
+If your relay folder is not the default `~/muse-relay`, pass `MUSE_RELAY_DIR` via `"env"`:
+
+```json
+{
+  "command": "node",
+  "args": ["<INSTALL_DIR>\\server.js"],
+  "env": {
+    "MUSE_RELAY_DIR": "D:\\path\\to\\muse-relay"
+  }
+}
+```
+
+#### Restart & Verify
+
+1. **Restart the host app or start a new session** — MCP hosts read their server list at startup, so the new tools appear only afterwards.
+2. **Verify end-to-end:** ask the host's agent to call `ask_muse_start` with a question only your personal Muse can answer (something about your own projects or earlier decisions), then `ask_muse_check` until the answer arrives. As soon as Muse finishes, `ask_muse_check` returns immediately.
 
 ## Usage
 
@@ -266,7 +344,8 @@ Second opinions, cross-project context, "what did I decide about X" — question
 | Setting | Where | Default | Notes |
 | --- | --- | --- | --- |
 | Relay folder | `MUSE_RELAY_DIR` env var | `%USERPROFILE%\muse-relay` (Windows) / `~/muse-relay` | Must match the folder the hook and panel use |
-| Blocking timeout | `timeoutSecs` argument of `ask_muse` | 600 (range 10–1800) | Timeout never cancels the question |
+| Blocking timeout | `timeoutSecs` argument of `ask_muse` | 600 (range 5–3600) | Timeout never cancels the question; returns ticket id for `ask_muse_check` |
+| Long-poll wait per check | `waitSecs` argument of `ask_muse_check` | 25 (range 0–600) | Returns immediately when answer arrives; returns `PENDING` after `waitSecs` |
 | Answer language | `answerLanguage` argument | `id` | Sent with each request; the worker answers in this language |
 
 ## Relay Protocol

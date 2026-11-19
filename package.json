@@ -1,17 +1,38 @@
 {
+  "name": "muse-relay-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that exposes your personal Muse (muse.ai) to other MCP hosts through the muse-relay file relay.",
+  "license": "Apache-2.0",
+  "private": true,
+  "main": "server.js",
   "bin": {
     "muse-relay-mcp": "server.js"
   },
-  "description": "MCP server that exposes your personal Muse (muse.ai) to other MCP hosts through the muse-relay file relay.",
+  "files": [
+    "server.js",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "engines": {
     "node": ">=18"
   },
-  "license": "Apache-2.0",
-  "main": "server.js",
-  "name": "muse-relay-mcp",
-  "private": true,
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check server.js"
   },
-  "version": "0.1.0"
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "muse",
+    "relay",
+    "claude",
+    "vscode",
+    "codex",
+    "antigravity"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/99apps-id/muse-relay-mcp.git"
+  }
 }

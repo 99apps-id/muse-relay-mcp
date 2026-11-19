@@ -1,10 +1,11 @@
+#!/usr/bin/env node
 'use strict';
 /*
  * muse-relay MCP server (zero dependencies, Node >= 18)
  *
- * Exposes your personal Muse (muse.ai) to any MCP host (termigo, ODON,
- * VS Code, Cursor, Gemini CLI, Claude Code, ...) through the muse-relay
- * async file relay:
+ * Exposes your personal Muse (muse.ai) to any MCP host (VS Code, Claude Code,
+ * Claude Desktop, OpenAI Codex CLI, Google Antigravity, Cursor, Windsurf,
+ * Gemini CLI, termigo, ODON, ...) through the muse-relay async file relay:
  *
  *   host --tools/call--> this server --req-<id>.json--> relay inbox
  *   Muse relay worker answers --> res-<id>.json in relay outbox
@@ -19,7 +20,8 @@
  * Tools:
  *   ask_muse        blocking: ask and wait for the answer in one call
  *   ask_muse_start  async: submit a question, get a ticket id back at once
- *   ask_muse_check  async: fetch the answer for a ticket id (or "pending")
+ *   ask_muse_check  async / long-poll: fetch the answer for a ticket id
+ *                   (returns immediately when ready, or waits up to waitSecs)
  *
  * Relay folder: %USERPROFILE%\muse-relay (override with MUSE_RELAY_DIR).
  */
@@ -36,8 +38,16 @@ const ARCHIVE = path.join(RELAY_DIR, 'archive');
 const CONTROL = path.join(RELAY_DIR, 'control.json');
 
 const SERVER_NAME = 'muse-relay';
-const SERVER_VERSION = '1.0.0';
+const SERVER_VERSION = '0.1.0';
 const DEFAULT_PROTOCOL = '2024-11-05';
+const SUPPORTED_PROTOCOLS = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);
+const SAFE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+// Grace period (ms) for an answer file that is currently being streamed over SSH
+const PARTIAL_WRITE_GRACE_MS = 10000;
+
+// Active in-flight JSON-RPC requests (requestIdKey -> { cancelled: boolean, onCancel: Function[] })
+const activeRequests = new Map();
 
 // ---------------------------------------------------------------- relay io
 
@@ -58,6 +68,10 @@ function genId() {
   return 'mcp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+function isValidTicketId(id) {
+  return typeof id === 'string' && SAFE_ID_RE.test(id);
+}
+
 function writeRequest(prompt, opts) {
   opts = opts || {};
   const id = genId();
@@ -75,31 +89,52 @@ function writeRequest(prompt, opts) {
     source: 'mcp'
   };
   fs.mkdirSync(INBOX, { recursive: true });
-  fs.writeFileSync(path.join(INBOX, 'req-' + id + '.json'), JSON.stringify(req, null, 2), 'utf8');
+  const payload = JSON.stringify(req, null, 2);
+  const finalPath = path.join(INBOX, 'req-' + id + '.json');
+  const tmpPath = path.join(INBOX, '.tmp-req-' + id + '.json');
+  try {
+    // Atomic write: write to hidden dotfile first so the SSH polling hook
+    // (which globs req-*.json) never sees a half-written request file.
+    fs.writeFileSync(tmpPath, payload, 'utf8');
+    fs.renameSync(tmpPath, finalPath);
+  } catch (e) {
+    try { fs.unlinkSync(tmpPath); } catch (_) { /* ignore */ }
+    fs.writeFileSync(finalPath, payload, 'utf8');
+  }
   return id;
 }
 
-// Returns { where: 'outbox'|'archive', data } or null.
+// Returns { where: 'outbox'|'archive', data, partial?: boolean, mtimeMs?: number } or null.
 function findResponse(id) {
+  if (!isValidTicketId(id)) return null;
   const name = 'res-' + id + '.json';
   const places = [['outbox', OUTBOX], ['archive', ARCHIVE]];
   for (const [where, dir] of places) {
     const p = path.join(dir, name);
     if (fs.existsSync(p)) {
       try {
-        return { where: where, data: JSON.parse(fs.readFileSync(p, 'utf8')) };
+        const raw = fs.readFileSync(p, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.answer === 'string') {
+          return { where: where, data: parsed, partial: false };
+        }
+        const stat = fs.statSync(p);
+        return { where: where, data: parsed, partial: true, mtimeMs: stat.mtimeMs };
       } catch (e) {
-        return { where: where, data: null };
+        let mtimeMs = Date.now();
+        try { mtimeMs = fs.statSync(p).mtimeMs; } catch (_) { /* ignore */ }
+        return { where: where, data: null, partial: true, mtimeMs: mtimeMs };
       }
     }
   }
   return null;
 }
 
-// After reading an answer from the outbox, move it to the archive (the
-// VS Code panel does the same) so the outbox stays clean. Best effort.
+// After reading a complete answer from the outbox, move it to the archive
+// (the VS Code panel does the same) so the outbox stays clean. Best effort.
 function consumeResponse(id, found) {
-  if (!found || found.where !== 'outbox') return;
+  if (!found || found.where !== 'outbox' || found.partial) return;
+  if (!isValidTicketId(id)) return;
   try {
     fs.mkdirSync(ARCHIVE, { recursive: true });
     fs.renameSync(path.join(OUTBOX, 'res-' + id + '.json'), path.join(ARCHIVE, 'res-' + id + '.json'));
@@ -107,6 +142,7 @@ function consumeResponse(id, found) {
 }
 
 function requestLocation(id) {
+  if (!isValidTicketId(id)) return null;
   if (fs.existsSync(path.join(INBOX, 'req-' + id + '.json'))) return 'inbox';
   if (fs.existsSync(path.join(ARCHIVE, 'req-' + id + '.json'))) return 'archive';
   return null;
@@ -116,6 +152,99 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Instant event-driven wait with fallback timer:
+// Watches OUTBOX and ARCHIVE via fs.watch so as soon as res-<id>.json is
+// written, we wake up within milliseconds instead of waiting for a fixed poll interval.
+function waitForResponseOrTimeout(id, maxWaitMs, reqState, onTick) {
+  return new Promise((resolve) => {
+    const targetFile = 'res-' + id + '.json';
+    const deadline = Date.now() + maxWaitMs;
+    let settled = false;
+    const watchers = [];
+    let pollTimer = null;
+    let tickCounter = 0;
+
+    function cleanup() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      while (watchers.length > 0) {
+        const w = watchers.pop();
+        try { w.close(); } catch (_) { /* ignore */ }
+      }
+    }
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    }
+
+    function checkNow() {
+      if (settled) return;
+      if (reqState && reqState.cancelled) {
+        finish({ cancelled: true, found: null });
+        return;
+      }
+      const found = findResponse(id);
+      if (found) {
+        if (!found.partial && found.data && typeof found.data.answer === 'string') {
+          finish({ cancelled: false, found: found });
+          return;
+        }
+        // If partial write exceeded grace period, stop waiting and report it
+        const ageMs = Date.now() - (found.mtimeMs || 0);
+        if (ageMs > PARTIAL_WRITE_GRACE_MS) {
+          finish({ cancelled: false, found: found });
+          return;
+        }
+        // Otherwise file is actively arriving over SSH; re-check very soon (150ms)
+        setTimeout(checkNow, 150);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        finish({ cancelled: false, found: null });
+      }
+    }
+
+    // Immediate check first (0ms latency if already answered)
+    checkNow();
+    if (settled) return;
+
+    if (reqState && Array.isArray(reqState.onCancel)) {
+      reqState.onCancel.push(() => finish({ cancelled: true, found: null }));
+    }
+
+    // Attach fs.watch on OUTBOX and ARCHIVE for instant wakeup when Muse finishes
+    for (const dir of [OUTBOX, ARCHIVE]) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        const watcher = fs.watch(dir, (eventType, filename) => {
+          if (!filename || filename === targetFile) {
+            // Brief 40ms debounce so the file write flush finishes before read
+            setTimeout(checkNow, 40);
+          }
+        });
+        watcher.on('error', () => { /* fallback polling handles errors */ });
+        watchers.push(watcher);
+      } catch (_) {
+        // Directory watch unavailable; fallback interval below still covers it
+      }
+    }
+
+    // Fallback 1-second poll + progress heartbeat
+    pollTimer = setInterval(() => {
+      tickCounter++;
+      if (onTick && tickCounter % 10 === 0) {
+        try { onTick(tickCounter); } catch (_) { /* ignore */ }
+      }
+      checkNow();
+    }, 1000);
+  });
+}
+
 function pausedError() {
   return {
     isError: true,
@@ -123,15 +252,18 @@ function pausedError() {
   };
 }
 
-function pendingText(id) {
+function pendingText(id, waitedSecs) {
   const loc = requestLocation(id);
+  const waitedNote = waitedSecs ? ' (waited ' + waitedSecs + 's in this check)' : '';
   if (loc === 'inbox') {
-    return 'PENDING: request ' + id + ' is still in the relay inbox waiting for a Muse worker. ' +
+    return 'PENDING' + waitedNote + ': request ' + id + ' is still in the relay inbox waiting for a Muse worker. ' +
+      'Call ask_muse_check again with id="' + id + '" (you can set waitSecs up to 120) to keep waiting. ' +
       'If it stays unanswered for more than ~15 minutes, the relay watchdog re-wakes it automatically (max 2 times). ' +
-      'If it has been pending far longer, the relay hook on the Muse side is probably disabled — ask Muse in the web chat to check the relay.';
+      'If it has been pending far longer than that, the relay hook on the Muse side is probably disabled - ask Muse in the web chat to check the relay.';
   }
   if (loc === 'archive') {
-    return 'PENDING: request ' + id + ' was archived but no answer file exists yet. Check again shortly.';
+    return 'PENDING' + waitedNote + ': request ' + id + ' was picked up and archived by the Muse worker, and is currently being processed. ' +
+      'Call ask_muse_check again with id="' + id + '" to wait for the answer file.';
   }
   return null;
 }
@@ -142,25 +274,35 @@ const TOOLS = [
   {
     name: 'ask_muse',
     description: 'Ask your personal Muse (muse.ai) a question and WAIT for the answer in this single call (blocking). ' +
-      'The answer comes from Claude with long-term memory of your projects, not from a raw model. ' +
-      'Typical wait is 1-10 minutes because the relay worker queue is serial; the call gives up after timeoutSecs ' +
-      'but the question stays alive — on timeout you get the ticket id and can fetch the answer later with ask_muse_check. ' +
-      'Use for a single self-contained question. For long questions, or when your tool-call timeout is short, prefer ask_muse_start + ask_muse_check.',
+      'As soon as Muse finishes, the answer is delivered immediately via filesystem event watch. ' +
+      'Typical wait is 1-10 minutes because the relay worker queue is serial; the call waits up to timeoutSecs ' +
+      '(default 600s, up to 3600s). If timeoutSecs is reached before Muse finishes, the question stays alive and ' +
+      'returns the ticket id so you can continue waiting with ask_muse_check. ' +
+      'If your MCP host has a short tool-call timeout (e.g. 60-120s), either pass a smaller timeoutSecs or use ask_muse_start + ask_muse_check.',
     inputSchema: {
       type: 'object',
       properties: {
         prompt: { type: 'string', description: 'The question or task for Muse. Include any context it needs; Muse cannot see your screen.' },
         workspaceRoot: { type: 'string', description: 'Optional absolute path of the workspace the question is about (helps Muse orient).' },
         answerLanguage: { type: 'string', enum: ['id', 'en'], description: 'Language for Muse\'s answer. Default id (Bahasa Indonesia).' },
-        timeoutSecs: { type: 'number', description: 'How long to wait for the answer, seconds. Default 600, min 10, max 1800.' }
+        timeoutSecs: { type: 'number', description: 'How long to wait for the answer in seconds. Default 600, min 5, max 3600.' }
       },
-      required: ['prompt']
+      required: ['prompt'],
+      additionalProperties: false
+    },
+    annotations: {
+      title: 'Ask Muse (Blocking)',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true
     }
   },
   {
     name: 'ask_muse_start',
     description: 'Submit a question to your personal Muse (muse.ai) WITHOUT waiting (async). Returns a ticket id immediately. ' +
-      'Fetch the answer later with ask_muse_check. Use this when the question is long-running or your tool-call timeout is short.',
+      'Fetch the answer with ask_muse_check (which supports waiting per check via waitSecs). ' +
+      'Preferred for coding agents so tool calls never hit host timeouts.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -168,19 +310,38 @@ const TOOLS = [
         workspaceRoot: { type: 'string', description: 'Optional absolute path of the workspace the question is about.' },
         answerLanguage: { type: 'string', enum: ['id', 'en'], description: 'Language for Muse\'s answer. Default id (Bahasa Indonesia).' }
       },
-      required: ['prompt']
+      required: ['prompt'],
+      additionalProperties: false
+    },
+    annotations: {
+      title: 'Ask Muse Start (Async Submit)',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true
     }
   },
   {
     name: 'ask_muse_check',
-    description: 'Check a ticket from ask_muse_start (or a timed-out ask_muse). Returns Muse\'s answer when ready, or a PENDING status. ' +
-      'Safe to call repeatedly.',
+    description: 'Check or wait for a ticket from ask_muse_start (or a timed-out ask_muse). ' +
+      'If the answer is already in the outbox, returns IMMEDIATELY (0ms). ' +
+      'If not ready yet, waits up to waitSecs (default 25s, range 0-600s) watching the outbox in real time and returns the instant Muse finishes. ' +
+      'If still pending after waitSecs, returns a PENDING status — simply call ask_muse_check again to continue waiting.',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'The ticket id returned by ask_muse_start / ask_muse.' }
+        id: { type: 'string', description: 'The ticket id returned by ask_muse_start / ask_muse.' },
+        waitSecs: { type: 'number', description: 'Seconds to wait for the answer before returning PENDING (default 25, min 0 for instant check, max 600). Returns immediately as soon as the answer arrives.' }
       },
-      required: ['id']
+      required: ['id'],
+      additionalProperties: false
+    },
+    annotations: {
+      title: 'Ask Muse Check (Fetch / Long-Poll Ticket)',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false
     }
   }
 ];
@@ -189,27 +350,44 @@ function toolResult(text, isError) {
   return { content: [{ type: 'text', text: text }], isError: !!isError };
 }
 
-async function callAskMuse(args) {
+async function callAskMuse(args, reqState) {
   if (isPaused()) { const p = pausedError(); return toolResult(p.text, true); }
   const prompt = String((args && args.prompt) || '').trim();
   if (!prompt) return toolResult('prompt is required.', true);
-  let timeoutSecs = Number(args && args.timeoutSecs) || 600;
-  timeoutSecs = Math.min(1800, Math.max(10, timeoutSecs));
+  let timeoutSecs = (args && args.timeoutSecs !== undefined && args.timeoutSecs !== null)
+    ? Number(args.timeoutSecs)
+    : 600;
+  if (Number.isNaN(timeoutSecs)) timeoutSecs = 600;
+  timeoutSecs = Math.min(3600, Math.max(5, timeoutSecs));
+
   const id = writeRequest(prompt, args);
-  const deadline = Date.now() + timeoutSecs * 1000;
-  while (Date.now() < deadline) {
-    const found = findResponse(id);
-    if (found) {
-      consumeResponse(id, found);
-      if (found.data && typeof found.data.answer === 'string') return toolResult(found.data.answer, false);
-      return toolResult('Muse returned an unreadable answer file for request ' + id + '.', true);
+  const outcome = await waitForResponseOrTimeout(
+    id,
+    timeoutSecs * 1000,
+    reqState,
+    (elapsedSecs) => {
+      if (reqState && reqState.progressToken !== undefined) {
+        sendProgress(reqState.progressToken, elapsedSecs, timeoutSecs, 'Waiting for Muse answer (ticket ' + id + ', ' + elapsedSecs + 's elapsed)...');
+      }
     }
-    await sleep(2000);
+  );
+
+  if (outcome.cancelled) return null;
+  if (outcome.found) {
+    if (!outcome.found.partial && outcome.found.data && typeof outcome.found.data.answer === 'string') {
+      consumeResponse(id, outcome.found);
+      return toolResult(outcome.found.data.answer, false);
+    }
+    return toolResult('Muse returned an unreadable answer file for request ' + id + '.', true);
   }
+
+  // Return isError: false so strict coding agents don't abort the turn on timeout,
+  // and instead smoothly transition to calling ask_muse_check with the ticket id.
   return toolResult(
-    'TIMEOUT after ' + timeoutSecs + 's: Muse has not answered yet, but the question is still queued (ticket ' + id + '). ' +
-    'Fetch the answer later with ask_muse_check using this ticket id. Do not resubmit the same question.',
-    true
+    'PENDING (waited ' + timeoutSecs + 's): Muse is still working on your question (ticket ' + id + '). ' +
+    'The question was NOT cancelled. Call ask_muse_check with {"id": "' + id + '", "waitSecs": 45} to continue waiting for the answer. ' +
+    'Do not resubmit the same question.',
+    false
   );
 }
 
@@ -221,20 +399,53 @@ function callAskMuseStart(args) {
   return toolResult(JSON.stringify({
     id: id,
     status: 'queued',
-    note: 'Question submitted to the Muse relay. Fetch the answer with ask_muse_check. Typical wait 1-10 minutes.'
+    note: 'Question submitted to the Muse relay. Call ask_muse_check with {"id": "' + id + '"} to wait for and fetch the answer. As soon as Muse finishes, ask_muse_check returns immediately.'
   }), false);
 }
 
-function callAskMuseCheck(args) {
+async function callAskMuseCheck(args, reqState) {
   const id = String((args && args.id) || '').trim();
   if (!id) return toolResult('id is required.', true);
-  const found = findResponse(id);
-  if (found) {
-    consumeResponse(id, found);
-    if (found.data && typeof found.data.answer === 'string') return toolResult(found.data.answer, false);
+  if (!isValidTicketId(id)) {
+    return toolResult('Invalid ticket id format: ' + id + '.', true);
+  }
+
+  let waitSecs = (args && args.waitSecs !== undefined && args.waitSecs !== null)
+    ? Number(args.waitSecs)
+    : 25;
+  if (Number.isNaN(waitSecs)) waitSecs = 25;
+  waitSecs = Math.min(600, Math.max(0, waitSecs));
+
+  // Fast check before waiting: if ticket doesn't exist anywhere, fail immediately
+  const initialFound = findResponse(id);
+  if (!initialFound && !requestLocation(id)) {
+    return toolResult('Unknown ticket id ' + id + ': no request or answer file exists for it in the relay folders.', true);
+  }
+
+  const outcome = await waitForResponseOrTimeout(
+    id,
+    waitSecs * 1000,
+    reqState,
+    (elapsedSecs) => {
+      if (reqState && reqState.progressToken !== undefined) {
+        sendProgress(reqState.progressToken, elapsedSecs, waitSecs, 'Waiting for Muse ticket ' + id + ' (' + elapsedSecs + 's)...');
+      }
+    }
+  );
+
+  if (outcome.cancelled) return null;
+  if (outcome.found) {
+    if (!outcome.found.partial && outcome.found.data && typeof outcome.found.data.answer === 'string') {
+      consumeResponse(id, outcome.found);
+      return toolResult(outcome.found.data.answer, false);
+    }
+    if ((Date.now() - (outcome.found.mtimeMs || 0)) <= PARTIAL_WRITE_GRACE_MS) {
+      return toolResult('PENDING: answer for request ' + id + ' is currently arriving in the outbox. Call ask_muse_check again shortly.', false);
+    }
     return toolResult('Muse returned an unreadable answer file for request ' + id + '.', true);
   }
-  const pending = pendingText(id);
+
+  const pending = pendingText(id, waitSecs);
   if (pending) return toolResult(pending, false);
   return toolResult('Unknown ticket id ' + id + ': no request or answer file exists for it in the relay folders.', true);
 }
@@ -253,35 +464,105 @@ function replyError(id, code, message) {
   send({ jsonrpc: '2.0', id: id, error: { code: code, message: message } });
 }
 
+function sendProgress(progressToken, progress, total, message) {
+  send({
+    jsonrpc: '2.0',
+    method: 'notifications/progress',
+    params: {
+      progressToken: progressToken,
+      progress: progress,
+      total: total,
+      message: message
+    }
+  });
+}
+
 async function handle(msg) {
+  if (!msg || typeof msg !== 'object') return;
   const method = msg.method;
   const id = msg.id;
   const isNotification = id === undefined || id === null;
 
+  if (typeof method !== 'string') {
+    if (!isNotification) {
+      replyError(id, -32600, 'Invalid Request: missing method');
+    }
+    return;
+  }
+
   if (method === 'initialize') {
     const clientProtocol = msg.params && msg.params.protocolVersion;
+    const negotiatedProtocol = (clientProtocol && SUPPORTED_PROTOCOLS.has(clientProtocol))
+      ? clientProtocol
+      : (clientProtocol || DEFAULT_PROTOCOL);
     reply(id, {
-      protocolVersion: clientProtocol || DEFAULT_PROTOCOL,
+      protocolVersion: negotiatedProtocol,
       capabilities: { tools: {} },
       serverInfo: { name: SERVER_NAME, version: SERVER_VERSION }
     });
     return;
   }
-  if (isNotification) return; // notifications/initialized, cancelled, ...
+
+  if (method === 'notifications/cancelled' || method === '$/cancelRequest') {
+    const targetId = msg.params && (msg.params.requestId !== undefined ? msg.params.requestId : msg.params.id);
+    if (targetId !== undefined && targetId !== null) {
+      const state = activeRequests.get(String(targetId));
+      if (state) {
+        state.cancelled = true;
+        if (Array.isArray(state.onCancel)) {
+          state.onCancel.forEach((fn) => { try { fn(); } catch (_) {} });
+        }
+      }
+    }
+    return;
+  }
+
+  if (isNotification) return; // notifications/initialized, ...
+
   if (method === 'ping') { reply(id, {}); return; }
   if (method === 'tools/list') { reply(id, { tools: TOOLS }); return; }
+
+  // Graceful empty responses for optional discovery methods queried by some MCP clients
+  if (method === 'resources/list') { reply(id, { resources: [] }); return; }
+  if (method === 'resources/templates/list') { reply(id, { resourceTemplates: [] }); return; }
+  if (method === 'prompts/list') { reply(id, { prompts: [] }); return; }
+  if (method === 'logging/setLevel') { reply(id, {}); return; }
+
   if (method === 'tools/call') {
     const name = msg.params && msg.params.name;
     const args = (msg.params && msg.params.arguments) || {};
+    const meta = (msg.params && msg.params._meta) || {};
+    const reqKey = String(id);
+    const reqState = {
+      cancelled: false,
+      onCancel: [],
+      progressToken: meta.progressToken
+    };
+    activeRequests.set(reqKey, reqState);
     try {
-      if (name === 'ask_muse') { reply(id, await callAskMuse(args)); return; }
-      if (name === 'ask_muse_start') { reply(id, callAskMuseStart(args)); return; }
-      if (name === 'ask_muse_check') { reply(id, callAskMuseCheck(args)); return; }
+      if (name === 'ask_muse') {
+        const res = await callAskMuse(args, reqState);
+        if (!reqState.cancelled && res) reply(id, res);
+        return;
+      }
+      if (name === 'ask_muse_start') {
+        reply(id, callAskMuseStart(args));
+        return;
+      }
+      if (name === 'ask_muse_check') {
+        const res = await callAskMuseCheck(args, reqState);
+        if (!reqState.cancelled && res) reply(id, res);
+        return;
+      }
       replyError(id, -32602, 'Unknown tool: ' + name);
       return;
     } catch (e) {
-      reply(id, toolResult('muse-relay server error: ' + (e && e.message ? e.message : String(e)), true));
+      if (!reqState.cancelled) {
+        reply(id, toolResult('muse-relay server error: ' + (e && e.message ? e.message : String(e)), true));
+      }
       return;
+    } finally {
+      activeRequests.delete(reqKey);
     }
   }
   replyError(id, -32601, 'Method not found: ' + method);
@@ -303,3 +584,18 @@ rl.on('line', (line) => {
     handle(msg).catch(() => {});
   }
 });
+
+// Clean shutdown when the host closes stdio so no zombie polling loop survives
+function cleanExit() {
+  for (const state of activeRequests.values()) {
+    state.cancelled = true;
+    if (Array.isArray(state.onCancel)) {
+      state.onCancel.forEach((fn) => { try { fn(); } catch (_) {} });
+    }
+  }
+  process.exit(0);
+}
+rl.on('close', cleanExit);
+process.stdin.on('end', cleanExit);
+process.on('SIGTERM', cleanExit);
+process.on('SIGINT', cleanExit);
