@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-339933)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](#license)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](#license)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
 
 An MCP server that exposes **your personal Muse at [muse.ai](https://muse.ai)** as tools for other coding agents — terminal coding agents, IDEs, and other MCP hosts. Questions travel through the **muse-relay** file relay: the server writes a request file, a polling hook on the Muse side wakes a Muse worker, and the answer comes back as a file that the server returns as the tool result.
@@ -228,6 +228,6 @@ Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }
 
 ## License
 
-MIT — see the `LICENSE` file in this repository.
+Apache License 2.0 — see the `LICENSE` file in this repository. Attribution notices live in the `NOTICE` file; redistributions must preserve them (Apache License, Section 4(d)).
 
 Unofficial project. Muse and muse.ai are products of Meta; this server is not affiliated with or endorsed by Meta.
