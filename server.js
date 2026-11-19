@@ -38,7 +38,7 @@ const ARCHIVE = path.join(RELAY_DIR, 'archive');
 const CONTROL = path.join(RELAY_DIR, 'control.json');
 
 const SERVER_NAME = 'muse-relay';
-const SERVER_VERSION = '0.1.0';
+const SERVER_VERSION = '0.1.1';
 const DEFAULT_PROTOCOL = '2024-11-05';
 const SUPPORTED_PROTOCOLS = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);
 const SAFE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;

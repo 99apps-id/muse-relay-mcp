@@ -5,7 +5,7 @@
 <h1 align="center">muse-relay-mcp</h1>
 
 <p align="center">
-  <a href="https://github.com/99apps-id/muse-relay-mcp"><img src="https://img.shields.io/badge/release-v0.1.0-blue" alt="Release"></a>
+  <a href="https://github.com/99apps-id/muse-relay-mcp"><img src="https://img.shields.io/badge/release-v0.1.1-blue" alt="Release"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D18-339933" alt="Node"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License: Apache 2.0"></a>
   <img src="https://img.shields.io/badge/dependencies-none-brightgreen" alt="Dependencies">
@@ -390,6 +390,13 @@ Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }
 | Answers land in the panel but not the tool | Relay folder mismatch | Make sure `MUSE_RELAY_DIR` matches the folder the hook/panel actually use |
 
 ## Changelog
+
+### 0.1.1
+
+- **Instant delivery via `fs.watch`** — `ask_muse` and `ask_muse_check` watch `outbox/` and `archive/` with OS filesystem events so answers return within milliseconds of Muse finishing
+- **Long-polling on `ask_muse_check` (`waitSecs`)** — waits up to `waitSecs` (default 25 s, range 0–600 s) before returning `PENDING`, letting coding agents wait for long tasks without hitting host tool-call timeouts or burning rapid poll turns
+- **Soft `PENDING` timeout on `ask_muse` + MCP progress heartbeats** — `timeoutSecs` now extends up to 3600 s, emits `notifications/progress` when a `progressToken` is supplied, and returns a non-error `PENDING` message with the ticket id on timeout
+- **Relay safety & cross-agent compatibility** — atomic request file writes (`.tmp-req-*.json` → rename), 10 s grace period for in-flight SSH partial response writes, ticket ID path-traversal validation, `notifications/cancelled` support, clean shutdown on stdio close, MCP tool `annotations` (`readOnlyHint`, `idempotentHint`, etc.), `additionalProperties: false` for strict schemas, and ready-to-paste setup guides for VS Code, Claude Code, Claude Desktop, OpenAI Codex CLI (TOML), Google Antigravity, Cursor, Windsurf, and Gemini CLI
 
 ### 0.1.0 — first public release
 
