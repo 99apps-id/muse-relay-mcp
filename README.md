@@ -31,6 +31,7 @@ A real JSON-RPC session against `server.js` — handshake, tool list, an async q
   - [Part B — Make sure the relay is running](#part-b--make-sure-the-relay-is-running)
   - [Part C — Register it in your MCP host](#part-c--register-it-in-your-mcp-host)
 - [Usage](#usage)
+- [Use Cases](#use-cases)
 - [Configuration](#configuration)
 - [Relay Protocol](#relay-protocol)
 - [Security and Privacy](#security-and-privacy)
@@ -188,6 +189,55 @@ The MCP server is only the front door — without a running relay behind it, que
 - Use **blocking** `ask_muse` for quick questions from hosts with generous tool-call timeouts. If it times out, take the ticket id from the response and continue with `ask_muse_check` — the question stays alive.
 - Each call is a **one-shot question**, not a conversation thread: include the context the question needs in `prompt` (and `workspaceRoot` when relevant). Follow-up questions are new calls.
 - Answers typically take **1–10 minutes** (relay polling + a serial worker queue + the work itself). The relay watchdog re-wakes a request that stays unanswered for 15 minutes, at most 2 times.
+
+## Use Cases
+
+The point of the bridge is that the answer comes from **your personal Muse** — with its connected accounts, its own tools, and its long-term memory of your projects — not from a raw model that can only see the current workspace. Four patterns from real use:
+
+### 1. Pull your Instagram or Threads into the coding chat
+
+Building a content tool, a landing page, or a social dashboard, and the data you need lives in your social accounts? Let the coding agent ask Muse instead of copy-pasting between apps:
+
+```text
+ask_muse_start: "Fetch my 10 most recent Instagram posts with their like and
+comment counts, and summarize what performed best this week."
+
+ask_muse_start: "Read my Threads direct messages from the last 3 days, group
+them by topic, and list anything that still needs a reply."
+```
+
+Muse reads the connected account, does the summarizing, and the result lands as a tool result **inside the chat UI of your coding app** — VS Code, Claude Code, Antigravity, a terminal agent — right next to the code it is relevant to. This needs the account connected to your Muse; Muse reads only what the prompt asks for.
+
+### 2. Post to Instagram or Threads without leaving the editor
+
+The same path works in the other direction. The coding agent composes the request, Muse does the publishing:
+
+```text
+ask_muse: "Draft a short announcement for the v0.2 release (notes attached in
+the prompt) and post it to my Threads and Instagram."
+```
+
+Muse prepares the draft and shows you the **exact text for approval in its own chat** before anything is posted — a coding agent's say-so is never enough to publish under your name. Once you approve, Muse posts it and the confirmation comes back through the relay into the coding chat.
+
+### 3. Delegate a long, web-heavy errand to a Muse worker — a real run
+
+On 19 Nov 2026, an Antigravity agent (Opus 5.5) delegated a multi-step audit to a Muse worker through this bridge: find CCTV streams for three cities for a streaming-directory project, validate that every stream really plays, update the allowlist and the data file. The agent kept working locally; the Muse worker did the web research and validation.
+
+<p align="center">
+  <img src="images/delegated-task.png" alt="A real delegated task through muse-relay: an Antigravity agent asks a Muse worker to audit CCTV streams, and the result comes back by ticket" width="880">
+</p>
+<p align="center"><em>Rendered from the actual relay files of that run (ticket <code>mcp-mwnasqwq96ux4</code>), excerpted. The honest result — 0 new cameras passed, 79 existing entries re-verified — is exactly why the async pattern exists: the job took 23 minutes, far beyond any blocking tool-call timeout.</em></p>
+
+### 4. Borrow Muse's memory of your other projects
+
+A coding agent sees one workspace. Your Muse remembers the decisions, preferences, and history across all of them:
+
+```text
+ask_muse: "In my other terminal-agent project, why did we pin the parser
+library to a single version last month — and does that apply here?"
+```
+
+Second opinions, cross-project context, "what did I decide about X" — questions no amount of grepping the current repo can answer.
 
 ## Configuration
 
