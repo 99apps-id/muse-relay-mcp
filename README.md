@@ -1,6 +1,6 @@
 # muse-relay-mcp
 
-[![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/)
+[![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/99apps-id/muse-relay-mcp)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-339933)](https://nodejs.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](#license)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
@@ -109,7 +109,7 @@ Throughout this document, replace the placeholders with your own values:
 1. Clone this repository (or copy the project folder) to your install directory:
 
    ```bash
-   git clone <REPO_URL> muse-relay-mcp
+   git clone https://github.com/99apps-id/muse-relay-mcp.git muse-relay-mcp
    cd muse-relay-mcp
    ```
 
