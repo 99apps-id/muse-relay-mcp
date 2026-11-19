@@ -28,6 +28,7 @@ A real JSON-RPC session against `server.js` — handshake, tool list, an async q
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [For AI Agents (Automated Setup)](#for-ai-agents-automated-setup)
 - [Tools](#tools)
 - [Screenshot](#screenshot)
 - [Blocking vs Async](#blocking-vs-async)
@@ -55,12 +56,44 @@ Every step is labelled with its difficulty. If the relay already runs on your ma
 | --- | --- | --- | --- |
 | Relay check ([Part B](#part-b--set-up-the-relay-first-time-and-make-sure-it-is-running), step 5) | Confirmation the relay is live and not paused | 🟢 **Easy** | ~2 min |
 | [Part A — Get the server](#part-a--get-the-server) | `server.js` on your machine — no build, no `npm install` | 🟢 **Easy** — clone + one check command | ~5 min |
-| [Part B — Set up the relay](#part-b--set-up-the-relay-first-time-and-make-sure-it-is-running) *(only if no relay exists yet)* | The one-time relay behind the server | 🔴 **Advanced, one-time** — Tailscale + SSH server + a key; the polling hook is created by Muse on request | ~20–30 min |
+| [Part B — Set up the relay](#part-b--set-up-the-relay-first-time-and-make-sure-it-is-running) *(only if no relay exists yet)* | The one-time relay behind the server | 🔴 **Advanced, one-time** — any SSH route from Muse to this machine (e.g. reverse SSH tunnel `ssh -R`, jump host, Tailscale/WireGuard, or direct IP) + SSH key; the polling hook is created by Muse on request | ~20–30 min |
 | [Part C — Register it in your MCP host](#part-c--register-it-in-your-mcp-host) | The `ask_muse` tools in your agent | 🟡 **Moderate** — paste a JSON snippet, restart the host | ~5 min |
 
 The shortest path: relay live → **Part A** → **Part C** → restart the host → ask its agent to call `ask_muse_start` with a test question, then `ask_muse_check` until the answer arrives.
 
-*Not a terminal person?* The relay setup is the only steep part — open [muse.ai](https://muse.ai) and ask Muse to set up the `muse-relay-inbox` hook with you. Muse writes the hook and the worker instructions; your part is installing Tailscale and enabling the SSH server with a few pasted commands.
+*Not a terminal person?* The relay setup is the only steep part — open [muse.ai](https://muse.ai) and ask Muse to set up the `muse-relay-inbox` hook with you. Muse writes the hook and the worker instructions; your part is enabling an SSH route to your machine (Tailscale is optional — any SSH tunnel, reverse SSH `ssh -R`, VPN, or jump host works).
+
+## For AI Agents (Automated Setup)
+
+If an operator gives you (an AI coding agent such as **Claude Code, OpenAI Codex CLI, Google Antigravity, VS Code Copilot, Cursor, Windsurf, or Gemini CLI**) this repository URL and asks you to install or set it up for them, follow this exact checklist:
+
+1. **Dependencies & Prerequisites (Zero npm packages required):**
+   - Runtime required: **Node.js `>= 18`** (`node --version`) and **`git`** (or download `server.js` directly).
+   - **Do NOT run `npm install` or any build step** — `server.js` uses only built-in Node.js modules (`fs`, `os`, `path`, `readline`).
+   - **Tailscale is NOT required:** the relay only needs *any* working SSH path from Muse's environment to the relay folder on this machine (e.g. reverse SSH tunnel `ssh -R` via a VPS/jump host, Cloudflare Tunnel, WireGuard, ZeroTier, Tailscale, or direct IP). Do not install Tailscale unless the operator specifically asks for it.
+2. **Clone the repository & create the local relay directories:**
+   - Clone `https://github.com/99apps-id/muse-relay-mcp.git` into a persistent folder (e.g. `~/muse-relay-mcp` or the operator's preferred directory) and note the absolute path to `server.js`.
+   - Ensure the three relay directories exist (`~/muse-relay/inbox`, `~/muse-relay/outbox`, `~/muse-relay/archive`):
+     - **Windows (PowerShell):**
+       ```powershell
+       New-Item -ItemType Directory -Force "$env:USERPROFILE\muse-relay\inbox", "$env:USERPROFILE\muse-relay\outbox", "$env:USERPROFILE\muse-relay\archive"
+       ```
+     - **macOS / Linux (Bash):**
+       ```bash
+       mkdir -p "$HOME/muse-relay/inbox" "$HOME/muse-relay/outbox" "$HOME/muse-relay/archive"
+       ```
+3. **Smoke-test `server.js` locally:**
+   - Run `node --check server.js` and pipe the JSON-RPC `initialize` + `tools/list` smoke test from [Part A, step 3](#part-a--get-the-server) into `node server.js` to confirm `ask_muse`, `ask_muse_start`, and `ask_muse_check` are listed.
+4. **Register `muse-relay` in the operator's MCP host config (merge safely — never overwrite existing MCP servers):**
+   - **VS Code (`%APPDATA%\Code\User\mcp.json` or `.vscode/mcp.json`):** add under top-level `"servers"` with `"type": "stdio"`, `"command": "node"`, `"args": ["<ABSOLUTE_PATH_TO_SERVER_JS>"]`.
+   - **Claude Code:** run `claude mcp add muse-relay -- node "<ABSOLUTE_PATH_TO_SERVER_JS>"` (or merge into `~/.claude.json` under `"mcpServers"`).
+   - **OpenAI Codex CLI (`~/.codex/config.toml`):** append the TOML table `[mcp_servers.muse-relay]` with `command = "node"` and `args = ["<ABSOLUTE_PATH_TO_SERVER_JS>"]`.
+   - **Google Antigravity (`~/.gemini/antigravity/mcp_config.json`), Claude Desktop, Cursor (`~/.cursor/mcp.json`), Windsurf (`~/.codeium/windsurf/mcp_config.json`), Gemini CLI (`~/.gemini/settings.json`):** merge `"muse-relay": { "command": "node", "args": ["<ABSOLUTE_PATH_TO_SERVER_JS>"] }` under `"mcpServers"`.
+5. **Report clearly to the operator:**
+   - Tell the operator to **restart their IDE / agent session** so the new `muse-relay` MCP tools load.
+   - Check whether `~/muse-relay/control.json` or `~/muse-relay/applied.json` already exists:
+     - If they exist, the Muse-side SSH relay is already configured — remind the operator to ensure the relay is not paused (`"paused": false` in `control.json`) and that the `muse-relay-inbox` hook is enabled on muse.ai.
+     - If they do not exist yet, inform the operator that the local MCP server and relay folders are ready, and point them to the one-time SSH reachability + `muse-relay-inbox` hook setup in [Part B](#part-b--set-up-the-relay-first-time-and-make-sure-it-is-running).
 
 ## Tools
 
