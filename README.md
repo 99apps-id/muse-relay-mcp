@@ -1,9 +1,15 @@
-# muse-relay-mcp
+<p align="center">
+  <img src="images/muse-mascot-coding.gif" alt="Muse mascot coding - muse-relay-mcp" width="420">
+</p>
 
-[![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/99apps-id/muse-relay-mcp)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-339933)](https://nodejs.org/)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](#license)
-![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+<h1 align="center">muse-relay-mcp</h1>
+
+<p align="center">
+  <a href="https://github.com/99apps-id/muse-relay-mcp"><img src="https://img.shields.io/badge/release-v0.1.0-blue" alt="Release"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D18-339933" alt="Node"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License: Apache 2.0"></a>
+  <img src="https://img.shields.io/badge/dependencies-none-brightgreen" alt="Dependencies">
+</p>
 
 An MCP server that exposes **your personal Muse at [muse.ai](https://muse.ai)** as tools for other coding agents — terminal coding agents, IDEs, and other MCP hosts. Questions travel through the **muse-relay** file relay: the server writes a request file, a polling hook on the Muse side wakes a Muse worker, and the answer comes back as a file that the server returns as the tool result.
 
