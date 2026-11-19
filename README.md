@@ -21,6 +21,7 @@ A real JSON-RPC session against `server.js` — handshake, tool list, an async q
 
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [Tools](#tools)
 - [Screenshot](#screenshot)
 - [Blocking vs Async](#blocking-vs-async)
@@ -39,6 +40,21 @@ A real JSON-RPC session against `server.js` — handshake, tool list, an async q
 - [Troubleshooting](#troubleshooting)
 - [Changelog](#changelog)
 - [License](#license)
+
+## Quick Start
+
+Every step is labelled with its difficulty. If the relay already runs on your machine — for example because you installed the Muse Companion extension first — this is a five-minute job; the only hard part is the one-time relay setup, and most of that is done by Muse itself.
+
+| Step | What you get | Difficulty | Time |
+| --- | --- | --- | --- |
+| Relay check ([Part B](#part-b--set-up-the-relay-first-time-and-make-sure-it-is-running), step 5) | Confirmation the relay is live and not paused | 🟢 **Easy** | ~2 min |
+| [Part A — Get the server](#part-a--get-the-server) | `server.js` on your machine — no build, no `npm install` | 🟢 **Easy** — clone + one check command | ~5 min |
+| [Part B — Set up the relay](#part-b--set-up-the-relay-first-time-and-make-sure-it-is-running) *(only if no relay exists yet)* | The one-time relay behind the server | 🔴 **Advanced, one-time** — Tailscale + SSH server + a key; the polling hook is created by Muse on request | ~20–30 min |
+| [Part C — Register it in your MCP host](#part-c--register-it-in-your-mcp-host) | The `ask_muse` tools in your agent | 🟡 **Moderate** — paste a JSON snippet, restart the host | ~5 min |
+
+The shortest path: relay live → **Part A** → **Part C** → restart the host → ask its agent to call `ask_muse_start` with a test question, then `ask_muse_check` until the answer arrives.
+
+*Not a terminal person?* The relay setup is the only steep part — open [muse.ai](https://muse.ai) and ask Muse to set up the `muse-relay-inbox` hook with you. Muse writes the hook and the worker instructions; your part is installing Tailscale and enabling the SSH server with a few pasted commands.
 
 ## Tools
 
