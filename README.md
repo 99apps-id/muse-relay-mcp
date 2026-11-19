@@ -74,6 +74,7 @@ The server is a single dependency-free Node script speaking line-delimited JSON-
 - Node.js 18 or newer, available as `node`.
 - A working **muse-relay** on the same machine:
   - Relay folders `~/muse-relay/{inbox,outbox,archive}` (Windows: `C:\Users\<WINDOWS_USER>\muse-relay\...`), overridable with the `MUSE_RELAY_DIR` environment variable.
+  - A network path from Claude's environment to this machine. The hook polls the relay folders **over SSH**, so this machine must be reachable from Claude's side. The reference setup uses [Tailscale](https://tailscale.com/download) (install it on both ends, log in with the same account) plus an SSH server on this machine; any equivalent route — LAN, another VPN, a jump host — works just as well. Tailscale itself is not mandatory; SSH reachability is.
   - A polling hook named `muse-relay-inbox` enabled on the Muse side, which wakes a worker for new request files. A reference setup (folders, SSH/Tailscale reachability, the hook, and the worker instructions) is documented in the companion extension's README, Part B.
   - The relay must not be paused (`control.json` in the relay folder). While paused, every tool refuses fast with a `PAUSED` error.
 
@@ -116,11 +117,30 @@ Throughout this document, replace the placeholders with your own values:
 
    You should see two responses, the second listing `ask_muse`, `ask_muse_start`, and `ask_muse_check`.
 
-### Part B — Make sure the relay is running
+### Part B — Set up the relay (first time) and make sure it is running
 
-1. Confirm the relay folders exist (`inbox`, `outbox`, `archive` under the relay folder).
-2. In the muse.ai chat, confirm the `muse-relay-inbox` hook is **enabled** — if it is disabled, questions queue silently and calls time out.
-3. If you use the companion VS Code extension, make sure the relay is not paused in its panel.
+The MCP server is only the front door — without a running relay behind it, questions queue forever. If the relay already runs on this machine (for example because you installed the companion extension first), only step 5 applies. If you are starting from this server alone, work through all five steps:
+
+1. **Create the relay folders** on this machine (Windows PowerShell):
+
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\muse-relay\inbox"
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\muse-relay\outbox"
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\muse-relay\archive"
+   ```
+
+2. **Make this machine reachable from Claude's environment.** Install Tailscale on this machine and on the machine Muse runs on (or its jump host) from [tailscale.com/download](https://tailscale.com/download); log in with the **same Tailscale account** on both ends. Verify with `tailscale status`, and note this machine's mesh address via `tailscale ip -4` — Muse's side needs it as its SSH target. Another VPN, a plain LAN route, or a jump host is equally fine; only SSH reachability matters, Tailscale is simply the reference route.
+3. **Enable SSH into this machine** and install Muse's public key (ask Muse for it in the muse.ai chat). On Windows, in an elevated PowerShell:
+
+   ```powershell
+   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+   Start-Service sshd
+   Set-Service -Name sshd -StartupType Automatic
+   ```
+
+   Place the key in `C:\Users\<WINDOWS_USER>\.ssh\authorized_keys` — one key per line. If `<WINDOWS_USER>` is an administrator account, Windows OpenSSH reads `C:\ProgramData\ssh\administrators_authorized_keys` instead.
+4. **Create the polling hook on the Muse side.** In the muse.ai chat, ask Muse to create an event hook named `muse-relay-inbox` that polls the relay inbox over the SSH path from step 2 every 5 seconds, wakes a worker for each new `req-*.json`, and re-wakes a request that stays unanswered for 15 minutes (watchdog, max 2 retries). The worker reads the request, does the work, writes `res-<id>.json` to the outbox, and moves the request to the archive. A fuller reference — exact worker instructions and settings sync — is Part B of the companion extension's README.
+5. **Confirm it is live:** in the muse.ai chat, confirm the `muse-relay-inbox` hook is **enabled** — if it is disabled, questions queue silently and calls time out. Also make sure the relay is not paused (`control.json` in the relay folder; if you use the companion extension, check its panel). Then verify end-to-end in Part C, step 5.
 
 ### Part C — Register it in your MCP host
 
@@ -212,6 +232,7 @@ Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }
 | --- | --- | --- |
 | Tool returns `PAUSED` immediately | Relay paused (panel or `control.json`) | Resume the relay in the VS Code panel, or set `"paused": false` in `control.json` |
 | `ask_muse_check` stays `PENDING` forever | Muse-side hook disabled | Enable the `muse-relay-inbox` hook in the muse.ai chat; queued questions are answered once it runs |
+| First install, nothing ever answers | Relay prerequisite not set up yet (folders, SSH reachability, hook) | Work through Part B steps 1–4 |
 | Blocking call times out | Normal for long answers | Use the returned ticket with `ask_muse_check`, or switch to the async pair |
 | Host does not list the tools | Hosts load MCP config at startup | Restart the app or start a new session; re-check the JSON for trailing commas |
 | Server fails to start | `node` not on PATH for the host | Use the absolute path to the Node binary as `command` |
