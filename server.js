@@ -41,7 +41,7 @@ const PENDING_DIR = path.join(RELAY_DIR, 'pending');
 const CONTROL = path.join(RELAY_DIR, 'control.json');
 
 const SERVER_NAME = 'muse-relay';
-const SERVER_VERSION = '0.1.2';
+const SERVER_VERSION = '0.1.3';
 
 // Approval mode (control.json requireApproval === true, set from the Muse
 // Companion panel): new requests are written to PENDING_DIR instead of the

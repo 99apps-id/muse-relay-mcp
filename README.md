@@ -5,7 +5,7 @@
 <h1 align="center">muse-relay-mcp</h1>
 
 <p align="center">
-  <a href="https://github.com/99apps-id/muse-relay-mcp"><img src="https://img.shields.io/badge/release-v0.1.2-blue" alt="Release"></a>
+  <a href="https://github.com/99apps-id/muse-relay-mcp"><img src="https://img.shields.io/badge/release-v0.1.3-blue" alt="Release"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D18-339933" alt="Node"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License: Apache 2.0"></a>
   <img src="https://img.shields.io/badge/dependencies-none-brightgreen" alt="Dependencies">
@@ -492,9 +492,9 @@ Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }
 
 ## Changelog
 
-### Unreleased
+### 0.1.3
 
-- **Slash commands `/muse-pause`, `/muse-resume`, `/muse-status`** — pause or resume the relay from inside the coding agent. New `scripts/muse-relay-toggle.js` (flips only the `paused` key of `control.json`, honours `MUSE_RELAY_DIR`) and `scripts/install-commands.js` (installs the commands for Claude Code, Codex, Antigravity, Muse CLI, termixgo, Cursor, Gemini CLI and Windsurf). `server.js` is unchanged. See [Slash Commands](#slash-commands).
+- **Slash commands `/muse-pause`, `/muse-resume`, `/muse-status`** — pause or resume the relay from inside the coding agent. New `scripts/muse-relay-toggle.js` (flips only the `paused` key of `control.json`, honours `MUSE_RELAY_DIR`) and `scripts/install-commands.js` (installs the commands for Claude Code, Codex, Antigravity, Muse CLI, termixgo, Cursor, Gemini CLI and Windsurf). The `scripts/` folder is now shipped in the package. The only change in `server.js` is the version string reported in the MCP handshake. Companion note: [Muse Companion](https://github.com/99apps-id/muse-web-companion) v0.1.4 makes its status bar and panel follow these commands. See [Slash Commands](#slash-commands).
 
 ### 0.1.2
 

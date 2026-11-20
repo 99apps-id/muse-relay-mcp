@@ -1,6 +1,6 @@
 {
   "name": "muse-relay-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "MCP server that exposes your personal Muse (muse.ai) to other MCP hosts through the muse-relay file relay.",
   "license": "Apache-2.0",
   "private": true,
