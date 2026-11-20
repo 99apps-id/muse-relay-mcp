@@ -35,10 +35,20 @@ const RELAY_DIR = process.env.MUSE_RELAY_DIR || path.join(os.homedir(), 'muse-re
 const INBOX = path.join(RELAY_DIR, 'inbox');
 const OUTBOX = path.join(RELAY_DIR, 'outbox');
 const ARCHIVE = path.join(RELAY_DIR, 'archive');
+const PENDING_DIR = path.join(RELAY_DIR, 'pending');
 const CONTROL = path.join(RELAY_DIR, 'control.json');
 
 const SERVER_NAME = 'muse-relay';
-const SERVER_VERSION = '0.1.1';
+const SERVER_VERSION = '0.1.2';
+
+// Approval mode (control.json requireApproval === true, set from the Muse
+// Companion panel): new requests are written to PENDING_DIR instead of the
+// inbox and only reach Muse after the owner approves them in the panel.
+// Unapproved requests expire after this TTL and receive an expiry answer.
+const APPROVAL_TTL_MS = (() => {
+  const v = Number(process.env.MUSE_RELAY_APPROVAL_TTL_MS);
+  return Number.isFinite(v) && v >= 1000 ? v : 30 * 60 * 1000;
+})();
 const DEFAULT_PROTOCOL = '2024-11-05';
 const SUPPORTED_PROTOCOLS = new Set(['2024-11-05', '2025-03-26', '2025-06-18']);
 const SAFE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -64,6 +74,11 @@ function isPaused() {
   return !!(ctl && ctl.paused === true);
 }
 
+function approvalRequired() {
+  const ctl = readControl();
+  return !!(ctl && ctl.requireApproval === true);
+}
+
 function genId() {
   return 'mcp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
@@ -72,9 +87,13 @@ function isValidTicketId(id) {
   return typeof id === 'string' && SAFE_ID_RE.test(id);
 }
 
+// Returns { id, pendingApproval }. With approval mode on, the request lands
+// in PENDING_DIR (invisible to the Muse-side polling hook) until the owner
+// approves it in the Muse Companion panel, which moves it into the inbox.
 function writeRequest(prompt, opts) {
   opts = opts || {};
   const id = genId();
+  const needsApproval = approvalRequired();
   const req = {
     id: id,
     createdAt: new Date().toISOString(),
@@ -88,10 +107,15 @@ function writeRequest(prompt, opts) {
     diff: null,
     source: 'mcp'
   };
-  fs.mkdirSync(INBOX, { recursive: true });
+  if (needsApproval) {
+    req.needsApproval = true;
+    req.approvalStatus = 'pending';
+  }
+  const targetDir = needsApproval ? PENDING_DIR : INBOX;
+  fs.mkdirSync(targetDir, { recursive: true });
   const payload = JSON.stringify(req, null, 2);
-  const finalPath = path.join(INBOX, 'req-' + id + '.json');
-  const tmpPath = path.join(INBOX, '.tmp-req-' + id + '.json');
+  const finalPath = path.join(targetDir, 'req-' + id + '.json');
+  const tmpPath = path.join(targetDir, '.tmp-req-' + id + '.json');
   try {
     // Atomic write: write to hidden dotfile first so the SSH polling hook
     // (which globs req-*.json) never sees a half-written request file.
@@ -101,7 +125,7 @@ function writeRequest(prompt, opts) {
     try { fs.unlinkSync(tmpPath); } catch (_) { /* ignore */ }
     fs.writeFileSync(finalPath, payload, 'utf8');
   }
-  return id;
+  return { id: id, pendingApproval: needsApproval };
 }
 
 // Returns { where: 'outbox'|'archive', data, partial?: boolean, mtimeMs?: number } or null.
@@ -143,9 +167,55 @@ function consumeResponse(id, found) {
 
 function requestLocation(id) {
   if (!isValidTicketId(id)) return null;
+  if (fs.existsSync(path.join(PENDING_DIR, 'req-' + id + '.json'))) return 'pending';
   if (fs.existsSync(path.join(INBOX, 'req-' + id + '.json'))) return 'inbox';
   if (fs.existsSync(path.join(ARCHIVE, 'req-' + id + '.json'))) return 'archive';
   return null;
+}
+
+// If a request has waited in PENDING_DIR longer than APPROVAL_TTL_MS, expire
+// it: write an expiry answer to the outbox and archive the request file, so
+// ask_muse_check returns a definitive result instead of waiting forever.
+// Returns true when the request was expired by this call.
+function expireStalePending(id) {
+  if (!isValidTicketId(id)) return false;
+  const reqPath = path.join(PENDING_DIR, 'req-' + id + '.json');
+  let createdMs = NaN;
+  try {
+    const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
+    createdMs = Date.parse(req && req.createdAt);
+    if (Number.isNaN(createdMs)) createdMs = fs.statSync(reqPath).mtimeMs;
+  } catch (e) {
+    return false; // not in pending (or unreadable): nothing to expire
+  }
+  if (Date.now() - createdMs < APPROVAL_TTL_MS) return false;
+  const mins = Math.round(APPROVAL_TTL_MS / 60000);
+  const res = {
+    id: id,
+    createdAt: new Date().toISOString(),
+    answer: 'EXPIRED: the owner did not approve this request within ' + mins + ' minutes, so it was never sent to Muse. ' +
+      'Ask the user whether they want to submit it again.',
+    source: 'muse-relay-server'
+  };
+  try {
+    fs.mkdirSync(OUTBOX, { recursive: true });
+    fs.mkdirSync(ARCHIVE, { recursive: true });
+    const tmpPath = path.join(OUTBOX, '.tmp-res-' + id + '.json');
+    fs.writeFileSync(tmpPath, JSON.stringify(res, null, 2), 'utf8');
+    fs.renameSync(tmpPath, path.join(OUTBOX, 'res-' + id + '.json'));
+    fs.renameSync(reqPath, path.join(ARCHIVE, 'req-' + id + '.json'));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function approvalPendingText(id, waitedSecs) {
+  const waitedNote = waitedSecs ? ' (waited ' + waitedSecs + 's in this check)' : '';
+  const mins = Math.round(APPROVAL_TTL_MS / 60000);
+  return 'APPROVAL_PENDING' + waitedNote + ': request ' + id + ' is waiting for the owner to approve it in the Muse Companion panel (VS Code). ' +
+    'It has NOT reached Muse yet. Once approved it flows through the normal relay; if it is not approved within ' + mins + ' minutes it expires. ' +
+    'Call ask_muse_check again with id="' + id + '" to keep waiting, and tell the user it is waiting for their approval in the panel.';
 }
 
 function sleep(ms) {
@@ -255,6 +325,9 @@ function pausedError() {
 function pendingText(id, waitedSecs) {
   const loc = requestLocation(id);
   const waitedNote = waitedSecs ? ' (waited ' + waitedSecs + 's in this check)' : '';
+  if (loc === 'pending') {
+    return approvalPendingText(id, waitedSecs);
+  }
   if (loc === 'inbox') {
     return 'PENDING' + waitedNote + ': request ' + id + ' is still in the relay inbox waiting for a Muse worker. ' +
       'Call ask_muse_check again with id="' + id + '" (you can set waitSecs up to 120) to keep waiting. ' +
@@ -302,7 +375,8 @@ const TOOLS = [
     name: 'ask_muse_start',
     description: 'Submit a question to your personal Muse (muse.ai) WITHOUT waiting (async). Returns a ticket id immediately. ' +
       'Fetch the answer with ask_muse_check (which supports waiting per check via waitSecs). ' +
-      'Preferred for coding agents so tool calls never hit host timeouts.',
+      'Preferred for coding agents so tool calls never hit host timeouts. ' +
+      'If the owner enabled approval mode in the Muse Companion panel, the question first waits for their approval (status awaiting_approval) before it reaches Muse.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -326,7 +400,8 @@ const TOOLS = [
     description: 'Check or wait for a ticket from ask_muse_start (or a timed-out ask_muse). ' +
       'If the answer is already in the outbox, returns IMMEDIATELY (0ms). ' +
       'If not ready yet, waits up to waitSecs (default 25s, range 0-600s) watching the outbox in real time and returns the instant Muse finishes. ' +
-      'If still pending after waitSecs, returns a PENDING status — simply call ask_muse_check again to continue waiting.',
+      'If still pending after waitSecs, returns a PENDING status — simply call ask_muse_check again to continue waiting. ' +
+      'A ticket that is waiting for the owner\'s approval in the Muse Companion panel reports APPROVAL_PENDING instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -360,7 +435,7 @@ async function callAskMuse(args, reqState) {
   if (Number.isNaN(timeoutSecs)) timeoutSecs = 600;
   timeoutSecs = Math.min(3600, Math.max(5, timeoutSecs));
 
-  const id = writeRequest(prompt, args);
+  const id = writeRequest(prompt, args).id;
   const outcome = await waitForResponseOrTimeout(
     id,
     timeoutSecs * 1000,
@@ -381,6 +456,19 @@ async function callAskMuse(args, reqState) {
     return toolResult('Muse returned an unreadable answer file for request ' + id + '.', true);
   }
 
+  // The approval TTL may have elapsed during the wait: expire lazily so the
+  // caller gets the definitive expiry answer instead of a soft PENDING.
+  if (expireStalePending(id)) {
+    const expired = findResponse(id);
+    if (expired && !expired.partial && expired.data && typeof expired.data.answer === 'string') {
+      consumeResponse(id, expired);
+      return toolResult(expired.data.answer, false);
+    }
+  }
+  if (requestLocation(id) === 'pending') {
+    return toolResult(approvalPendingText(id, timeoutSecs), false);
+  }
+
   // Return isError: false so strict coding agents don't abort the turn on timeout,
   // and instead smoothly transition to calling ask_muse_check with the ticket id.
   return toolResult(
@@ -395,7 +483,16 @@ function callAskMuseStart(args) {
   if (isPaused()) { const p = pausedError(); return toolResult(p.text, true); }
   const prompt = String((args && args.prompt) || '').trim();
   if (!prompt) return toolResult('prompt is required.', true);
-  const id = writeRequest(prompt, args);
+  const submitted = writeRequest(prompt, args);
+  const id = submitted.id;
+  if (submitted.pendingApproval) {
+    const mins = Math.round(APPROVAL_TTL_MS / 60000);
+    return toolResult(JSON.stringify({
+      id: id,
+      status: 'awaiting_approval',
+      note: 'Approval mode is on: this question is waiting for the owner to approve it in the Muse Companion panel (VS Code) before it reaches Muse. It expires after ' + mins + ' minutes without approval. Call ask_muse_check with {"id": "' + id + '"} to wait for the outcome, and tell the user it is waiting for their approval in the panel.'
+    }), false);
+  }
   return toolResult(JSON.stringify({
     id: id,
     status: 'queued',
@@ -416,7 +513,9 @@ async function callAskMuseCheck(args, reqState) {
   if (Number.isNaN(waitSecs)) waitSecs = 25;
   waitSecs = Math.min(600, Math.max(0, waitSecs));
 
-  // Fast check before waiting: if ticket doesn't exist anywhere, fail immediately
+  // Fast check before waiting: expire a stale approval first so its expiry
+  // answer is what gets returned; if the ticket doesn't exist anywhere, fail.
+  expireStalePending(id);
   const initialFound = findResponse(id);
   if (!initialFound && !requestLocation(id)) {
     return toolResult('Unknown ticket id ' + id + ': no request or answer file exists for it in the relay folders.', true);
@@ -443,6 +542,15 @@ async function callAskMuseCheck(args, reqState) {
       return toolResult('PENDING: answer for request ' + id + ' is currently arriving in the outbox. Call ask_muse_check again shortly.', false);
     }
     return toolResult('Muse returned an unreadable answer file for request ' + id + '.', true);
+  }
+
+  // The wait may have crossed the approval TTL: expire and re-check once.
+  if (expireStalePending(id)) {
+    const expired = findResponse(id);
+    if (expired && !expired.partial && expired.data && typeof expired.data.answer === 'string') {
+      consumeResponse(id, expired);
+      return toolResult(expired.data.answer, false);
+    }
   }
 
   const pending = pendingText(id, waitSecs);

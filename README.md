@@ -5,7 +5,7 @@
 <h1 align="center">muse-relay-mcp</h1>
 
 <p align="center">
-  <a href="https://github.com/99apps-id/muse-relay-mcp"><img src="https://img.shields.io/badge/release-v0.1.1-blue" alt="Release"></a>
+  <a href="https://github.com/99apps-id/muse-relay-mcp"><img src="https://img.shields.io/badge/release-v0.1.2-blue" alt="Release"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D18-339933" alt="Node"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License: Apache 2.0"></a>
   <img src="https://img.shields.io/badge/dependencies-none-brightgreen" alt="Dependencies">
@@ -380,6 +380,8 @@ Second opinions, cross-project context, "what did I decide about X" — question
 | Blocking timeout | `timeoutSecs` argument of `ask_muse` | 600 (range 5–3600) | Timeout never cancels the question; returns ticket id for `ask_muse_check` |
 | Long-poll wait per check | `waitSecs` argument of `ask_muse_check` | 25 (range 0–600) | Returns immediately when answer arrives; returns `PENDING` after `waitSecs` |
 | Answer language | `answerLanguage` argument | `id` | Sent with each request; the worker answers in this language |
+| Approval mode | `requireApproval` in `control.json` (set from the Muse Companion panel) | off | Requests wait in `pending/` for the owner's panel approval before reaching Muse; see Relay Protocol |
+| Approval expiry | `MUSE_RELAY_APPROVAL_TTL_MS` env var | `1800000` (30 min) | How long an unapproved request waits before it expires with an `EXPIRED` answer |
 
 ## Relay Protocol
 
@@ -398,6 +400,8 @@ Requests are files named `req-<ticket>.json` in the relay inbox; the ticket id i
 
 Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }`). `ask_muse_check` looks in the outbox first, then the archive (the VS Code panel may archive a response before you check), and moves an outbox answer to the archive after returning it. `source: "mcp"` distinguishes bridge requests from panel requests (`source: "panel"`).
 
+**Approval mode.** When `control.json` contains `"requireApproval": true` (toggled from the Muse Companion panel), the server writes new requests to a `pending/` folder instead of the inbox, with `"needsApproval": true`. The Muse-side hook never sees them there. `ask_muse_start` reports status `awaiting_approval`; `ask_muse_check` reports `APPROVAL_PENDING`. When the owner approves in the panel, the panel moves the file into the inbox and the request flows as usual. If the owner rejects it, the agent receives a `DECLINED` answer; if nobody approves within 30 minutes (configurable via `MUSE_RELAY_APPROVAL_TTL_MS`), the request expires with an `EXPIRED` answer. Without the panel, a request can be approved manually by moving `pending/req-<id>.json` into `inbox/`.
+
 ## Security and Privacy
 
 - The server makes **no network calls** and collects nothing; it only reads and writes JSON files in the relay folder on your own machine.
@@ -409,6 +413,7 @@ Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }
 - Latency is minutes, not seconds; there is no streaming.
 - One worker lane on the Muse side: simultaneous questions are answered one at a time, in order. A single worker execution is capped at about 10 minutes by the platform; the watchdog covers failures after that.
 - One-shot Q&A only — no multi-turn session state is kept by the server.
+- Approval mode needs the Muse Companion panel to approve requests (or a manual file move from `pending/` to `inbox/`); with approval on and nobody approving, requests expire after 30 minutes.
 
 ## Troubleshooting
 
@@ -421,8 +426,14 @@ Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }
 | Host does not list the tools | Hosts load MCP config at startup | Restart the app or start a new session; re-check the JSON for trailing commas |
 | Server fails to start | `node` not on PATH for the host | Use the absolute path to the Node binary as `command` |
 | Answers land in the panel but not the tool | Relay folder mismatch | Make sure `MUSE_RELAY_DIR` matches the folder the hook/panel actually use |
+| Check returns `APPROVAL_PENDING` | Approval mode is on in the panel | The owner must approve the request card in the Muse Companion panel; unapproved requests expire after 30 minutes |
+| Agent or host warns about bot / automation-like behaviour | Bursty automated calls, repeated blocking retries after timeouts | Prefer `ask_muse_start` + `ask_muse_check`, never resubmit the same question, and enable approval mode in the panel so a human approves each request before it reaches Muse |
 
 ## Changelog
+
+### 0.1.2
+
+- **Approval mode (human-in-the-loop)** — when `control.json` has `"requireApproval": true` (toggled in the Muse Companion panel), new requests are written to a `pending/` folder instead of the inbox and only reach Muse after the owner approves them in the panel. `ask_muse_start` reports `awaiting_approval`, `ask_muse_check` reports `APPROVAL_PENDING`, a rejection comes back as a `DECLINED` answer, and requests left unapproved for 30 minutes (configurable via `MUSE_RELAY_APPROVAL_TTL_MS`) expire with an `EXPIRED` answer. This also answers reports of hosts flagging the bridge as bot-like: calls become human-approved instead of fully automatic.
 
 ### 0.1.1
 
