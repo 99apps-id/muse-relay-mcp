@@ -340,6 +340,8 @@ They are thin wrappers around one dependency-free script, `scripts/muse-relay-to
 node <INSTALL_DIR>/scripts/muse-relay-toggle.js pause     # or: resume | status
 ```
 
+If you also use the [Muse Companion](https://github.com/99apps-id/muse-web-companion) VS Code extension, its status bar and Chat panel follow these commands automatically from **v0.1.4**. Older versions only re-read `control.json` when the panel opens, so they can keep showing "Relay active" until you reopen it. The commands work either way, because the server itself reads `control.json` on every call.
+
 ### Installing the commands
 
 `scripts/install-commands.js` writes the commands into the agents you use. Each command calls the toggle script by **absolute path**, so keep this folder where it is (or re-run the installer after moving it).
