@@ -39,6 +39,7 @@ A real JSON-RPC session against `server.js` — handshake, tool list, an async q
   - [Part B — Make sure the relay is running](#part-b--make-sure-the-relay-is-running)
   - [Part C — Register it in your MCP host](#part-c--register-it-in-your-mcp-host)
 - [Usage](#usage)
+- [Slash Commands](#slash-commands)
 - [Use Cases](#use-cases)
 - [Configuration](#configuration)
 - [Relay Protocol](#relay-protocol)
@@ -323,6 +324,60 @@ If your relay folder is not the default `~/muse-relay`, pass `MUSE_RELAY_DIR` vi
 - Each call is a **one-shot question**, not a conversation thread: include the context the question needs in `prompt` (and `workspaceRoot` when relevant). Follow-up questions are new calls.
 - Answers typically take **1–10 minutes** (relay polling + a serial worker queue + the work itself). The relay watchdog re-wakes a request that stays unanswered for 15 minutes, at most 2 times.
 
+## Slash Commands
+
+Three ready-made commands let you pause and resume the relay from inside your coding agent, without opening the panel or editing `control.json` by hand:
+
+| Command | Effect |
+| --- | --- |
+| `/muse-pause` | Sets `"paused": true` in `control.json`. Every tool then refuses immediately with `PAUSED` instead of waiting for a timeout. |
+| `/muse-resume` | Sets `"paused": false`. |
+| `/muse-status` | Prints whether the relay is active or paused. Read-only. |
+
+They are thin wrappers around one dependency-free script, `scripts/muse-relay-toggle.js`, which only touches the `paused` key and leaves every other key of `control.json` (such as `requireApproval` and `desiredPollSecs`) as it is. It honours `MUSE_RELAY_DIR`, so it always edits the same file the server reads. You can also run it directly:
+
+```bash
+node <INSTALL_DIR>/scripts/muse-relay-toggle.js pause     # or: resume | status
+```
+
+### Installing the commands
+
+`scripts/install-commands.js` writes the commands into the agents you use. Each command calls the toggle script by **absolute path**, so keep this folder where it is (or re-run the installer after moving it).
+
+```bash
+node scripts/install-commands.js <target> [--dry-run]
+# targets: claude | codex | agy | muse | termixgo | cursor | gemini | windsurf | all
+```
+
+Use `--dry-run` first to see which files would be written. Restart the agent afterwards; most hosts read commands and skills only at startup.
+
+| Target | Where it writes | How you invoke it | Verified |
+| --- | --- | --- | --- |
+| `claude` (Claude Code CLI and VS Code extension) | `~/.claude/commands/muse-*.md` | `/muse-status` | Yes |
+| `codex` (Codex CLI and VS Code extension) | `~/.agents/skills/muse-*/SKILL.md` | `@muse-status` (or `$muse-status`) | Yes |
+| `agy` (Antigravity CLI and IDE) | `~/.gemini/config/skills/` and `~/.gemini/antigravity/skills/` | `/muse-status` | Yes |
+| `muse` (Muse CLI) | `~/.config/muse/skills/` | In `muse exec`, say "use the muse-status skill" | Yes |
+| `termixgo` | `~/.termixgo/skills/` | `/muse-status` (approve the command, or `termixgo run --yes`) | Yes |
+| `cursor` | `~/.cursor/commands/` | `/muse-status` | No |
+| `gemini` (Gemini CLI) | `~/.gemini/commands/*.toml` | `/muse-status` | No |
+| `windsurf` | `~/.codeium/windsurf/global_workflows/` | `/muse-status` | No |
+
+"Yes" means `/muse-status` was run on a real install; `pause` and `resume` were additionally exercised end to end on Antigravity and Codex. The last three formats were written from the vendors' documented layouts and have not been tested on a real install — treat them as a starting point. Skill-based targets (everything except `claude`, `cursor`, `gemini`, `windsurf`) use the shared `SKILL.md` format and are marked so the agent runs them only when you invoke them explicitly, never on its own.
+
+### Notes per agent
+
+- **Codex:** `pause` and `resume` write `control.json`, which lives outside your project. Codex's sandbox only allows writes inside the workspace, so either approve the command when Codex asks, or add the relay folder as a writable root in `~/.codex/config.toml`:
+
+  ```toml
+  [sandbox_workspace_write]
+  writable_roots = ['<RELAY_DIR>']
+  ```
+
+  `/muse-status` only reads, so it needs no extra permission. If a Windows sandbox refresh fails with `Access is denied` on this folder, see the ownership note under [Troubleshooting](#troubleshooting).
+- **Antigravity:** the slash menu lists **skills** (workflows are deprecated). Current builds read global skills from `~/.gemini/config/skills`; older ones used `~/.gemini/antigravity/skills`, which the installer also fills. Fully restart the IDE after installing.
+- **Muse CLI:** headless `muse exec "/muse-status"` does not expand slash commands — it treats the text as a path. Describe the skill in plain words, or use the interactive UI.
+- **termixgo:** skills are expanded, but running the command needs approval; non-interactive runs need `--yes`.
+
 ## Use Cases
 
 The point of the bridge is that the answer comes from **your personal Muse** — with its connected accounts, its own tools, and its long-term memory of your projects — not from a raw model that can only see the current workspace. Four patterns from real use:
@@ -419,7 +474,11 @@ Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Tool returns `PAUSED` immediately | Relay paused (panel or `control.json`) | Resume the relay in the VS Code panel, or set `"paused": false` in `control.json` |
+| Tool returns `PAUSED` immediately | Relay paused (panel or `control.json`) | Run `/muse-resume` (see [Slash Commands](#slash-commands)), resume in the VS Code panel, or set `"paused": false` in `control.json` |
+| `/muse-*` commands do not appear in the agent | Commands and skills load at startup, or the agent reads another folder | Fully restart the agent; check that the installer printed the folder your agent actually reads (see the table in [Slash Commands](#slash-commands)) |
+| Codex: `EPERM` writing `control.json` on pause/resume | Codex's sandbox blocks writes outside the workspace | Approve the command, or add the relay folder to `writable_roots` (see [Slash Commands](#slash-commands)) |
+| Codex (Windows): `setup refresh had errors`, log shows `write ACE failed ... Access is denied` | The project folder is owned by `Administrators` (for example it was cloned from an elevated shell), so your normal account cannot grant the sandbox access | In an elevated PowerShell: `takeown /F <INSTALL_DIR> /R /D Y`, then `icacls <INSTALL_DIR> /setowner "<WINDOWS_USER>" /T /C`; restart Codex |
+| Codex (Windows): `CreateProcessAsUserW failed: 1920` | The sandbox cannot launch `pwsh.exe` from the Microsoft Store `WindowsApps` alias | Install PowerShell 7 from the MSI (`winget install Microsoft.PowerShell --installer-type wix`) so `pwsh.exe` is under `Program Files` |
 | `ask_muse_check` stays `PENDING` forever | Muse-side hook disabled | Enable the `muse-relay-inbox` hook in the muse.ai chat; queued questions are answered once it runs |
 | First install, nothing ever answers | Relay prerequisite not set up yet (folders, SSH reachability, hook) | Work through Part B steps 1–4 |
 | Blocking call times out | Normal for long answers | Use the returned ticket with `ask_muse_check`, or switch to the async pair |
@@ -430,6 +489,10 @@ Answers are `res-<ticket>.json` in the outbox (`{ "id", "answeredAt", "answer" }
 | Agent or host warns about bot / automation-like behaviour | Bursty automated calls, repeated blocking retries after timeouts | Prefer `ask_muse_start` + `ask_muse_check`, never resubmit the same question, and enable approval mode in the panel so a human approves each request before it reaches Muse |
 
 ## Changelog
+
+### Unreleased
+
+- **Slash commands `/muse-pause`, `/muse-resume`, `/muse-status`** — pause or resume the relay from inside the coding agent. New `scripts/muse-relay-toggle.js` (flips only the `paused` key of `control.json`, honours `MUSE_RELAY_DIR`) and `scripts/install-commands.js` (installs the commands for Claude Code, Codex, Antigravity, Muse CLI, termixgo, Cursor, Gemini CLI and Windsurf). `server.js` is unchanged. See [Slash Commands](#slash-commands).
 
 ### 0.1.2
 
