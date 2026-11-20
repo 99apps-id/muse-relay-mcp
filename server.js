@@ -31,7 +31,9 @@ const os = require('os');
 const path = require('path');
 const readline = require('readline');
 
-const RELAY_DIR = process.env.MUSE_RELAY_DIR || path.join(os.homedir(), 'muse-relay');
+const RELAY_DIR = process.env.MUSE_RELAY_DIR && process.env.MUSE_RELAY_DIR.trim()
+  ? path.resolve(process.env.MUSE_RELAY_DIR.trim())
+  : path.join(os.homedir(), 'muse-relay');
 const INBOX = path.join(RELAY_DIR, 'inbox');
 const OUTBOX = path.join(RELAY_DIR, 'outbox');
 const ARCHIVE = path.join(RELAY_DIR, 'archive');
@@ -192,7 +194,7 @@ function expireStalePending(id) {
   const mins = Math.round(APPROVAL_TTL_MS / 60000);
   const res = {
     id: id,
-    createdAt: new Date().toISOString(),
+    answeredAt: new Date().toISOString(),
     answer: 'EXPIRED: the owner did not approve this request within ' + mins + ' minutes, so it was never sent to Muse. ' +
       'Ask the user whether they want to submit it again.',
     source: 'muse-relay-server'
@@ -231,14 +233,28 @@ function waitForResponseOrTimeout(id, maxWaitMs, reqState, onTick) {
     const deadline = Date.now() + maxWaitMs;
     let settled = false;
     const watchers = [];
+    const pendingTimers = new Set();
     let pollTimer = null;
     let tickCounter = 0;
+
+    function scheduleCheck(delayMs) {
+      if (settled) return;
+      const t = setTimeout(() => {
+        pendingTimers.delete(t);
+        checkNow();
+      }, delayMs);
+      pendingTimers.add(t);
+    }
 
     function cleanup() {
       if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
       }
+      for (const t of pendingTimers) {
+        clearTimeout(t);
+      }
+      pendingTimers.clear();
       while (watchers.length > 0) {
         const w = watchers.pop();
         try { w.close(); } catch (_) { /* ignore */ }
@@ -258,6 +274,8 @@ function waitForResponseOrTimeout(id, maxWaitMs, reqState, onTick) {
         finish({ cancelled: true, found: null });
         return;
       }
+      // Expire a pending approval lazily as soon as its TTL elapses during the wait
+      expireStalePending(id);
       const found = findResponse(id);
       if (found) {
         if (!found.partial && found.data && typeof found.data.answer === 'string') {
@@ -271,7 +289,7 @@ function waitForResponseOrTimeout(id, maxWaitMs, reqState, onTick) {
           return;
         }
         // Otherwise file is actively arriving over SSH; re-check very soon (150ms)
-        setTimeout(checkNow, 150);
+        scheduleCheck(150);
         return;
       }
       if (Date.now() >= deadline) {
@@ -294,7 +312,7 @@ function waitForResponseOrTimeout(id, maxWaitMs, reqState, onTick) {
         const watcher = fs.watch(dir, (eventType, filename) => {
           if (!filename || filename === targetFile) {
             // Brief 40ms debounce so the file write flush finishes before read
-            setTimeout(checkNow, 40);
+            scheduleCheck(40);
           }
         });
         watcher.on('error', () => { /* fallback polling handles errors */ });
@@ -441,7 +459,7 @@ async function callAskMuse(args, reqState) {
     timeoutSecs * 1000,
     reqState,
     (elapsedSecs) => {
-      if (reqState && reqState.progressToken !== undefined) {
+      if (reqState && reqState.progressToken !== undefined && reqState.progressToken !== null) {
         sendProgress(reqState.progressToken, elapsedSecs, timeoutSecs, 'Waiting for Muse answer (ticket ' + id + ', ' + elapsedSecs + 's elapsed)...');
       }
     }
@@ -526,7 +544,7 @@ async function callAskMuseCheck(args, reqState) {
     waitSecs * 1000,
     reqState,
     (elapsedSecs) => {
-      if (reqState && reqState.progressToken !== undefined) {
+      if (reqState && reqState.progressToken !== undefined && reqState.progressToken !== null) {
         sendProgress(reqState.progressToken, elapsedSecs, waitSecs, 'Waiting for Muse ticket ' + id + ' (' + elapsedSecs + 's)...');
       }
     }
