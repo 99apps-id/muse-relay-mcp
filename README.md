@@ -322,6 +322,7 @@ If your relay folder is not the default `~/muse-relay`, pass `MUSE_RELAY_DIR` vi
 - Prefer the **async pair** for coding agents: `ask_muse_start`, keep working, then `ask_muse_check` every so often.
 - Use **blocking** `ask_muse` for quick questions from hosts with generous tool-call timeouts. If it times out, take the ticket id from the response and continue with `ask_muse_check` — the question stays alive.
 - Each call is a **one-shot question**, not a conversation thread: include the context the question needs in `prompt` (and `workspaceRoot` when relevant). Follow-up questions are new calls.
+- **What context does Muse see?** Only what is in the `prompt` (plus `workspaceRoot` when the agent passes it). The MCP bridge sends no active file, selection, workspace tree or diff — those fields exist in the relay request format, but only the VS Code panel fills them, where you tick the attachments yourself. If a coding agent needs Muse to see a file, it must paste the relevant part into the prompt.
 - Answers typically take **1–10 minutes** (relay polling + a serial worker queue + the work itself). The relay watchdog re-wakes a request that stays unanswered for 15 minutes, at most 2 times.
 
 ## Slash Commands
